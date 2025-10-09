@@ -1,0 +1,452 @@
+---
+title: 'HW 2: Предсказание отклика различных групп респондентов на новую макркетинговую кампанию'
+author: "Пясецкая Вероника, vvpyasetskaya"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+## Задача
+
+Спрогнозировать, какие группы респондентов окажутся наиболее восприимчивы к новой маркетинговой кампании, проводимой в сети магазинов. Иными словами, определить целевую аудиторию предстоящей кампании, выявив закономерности в реакции респондентов и предсказав их отклик на неё. Выводы данного исследования могут быть использованы для более точечного и предметного воздействия на клиента с помощью маркетинговых инструментов.
+
+### Загрузка данных и преобразование
+
+```{r message = FALSE, warning=FALSE}
+marketing = read.csv("~/shared/minor2_2022/1-Intro/hw2/marketing_campaign.csv")
+source("~/shared/minor2_2022/1-Intro/lab09-gini-trees/compute_gini.R") 
+library(dplyr)
+library(rpart.plot)
+library(rpart)
+library(lubridate)
+library(ggplot2)
+library(coin)
+library(skimr)
+```
+
+В процессе первичной обработки данных перемнные типа character и ряд числовых переменных были преобразованы в факторные. 
+На дальнейших этапах анализа была удалена переменная ID.Так же были выявлены и удалены наблюдения имеющие неизвестные значения в важной для исследования переменной Income. Из наблюдений по переменным Age и Income были удалены выбросы, так же по переменной Marital_Status были удалены ответы "YOLO" и "Absurd". 
+Переменная Dt_Customer была преобразована в дату вида: день-месяц-год, и с её помощью была создана новая переменная Age (возраст респондентов). Кроме того, при расмотрении Вопроса №6 была создана переменная food_percent, представляющая долю дохода, которую респондент тратит на продукты питания.
+
+
+```{r message = FALSE, warning=FALSE}
+marketing = marketing %>% filter(!(is.na(marketing$Dt_Customer)))
+marketing = marketing %>% mutate_if(is.character, as.factor)
+marketing$Response = as.factor(marketing$Response)
+marketing$AcceptedCmp = as.factor(marketing$AcceptedCmp)
+marketing$Complain = as.factor(marketing$Complain)
+marketing = marketing %>% filter(!is.na(Income))
+```
+
+### Исследовательские вопросы и тесты
+
+*Проведём разведовательный анализ*
+
+Выясним, как распределены клиенты по возрасту
+```{r message = FALSE, warning=FALSE}
+marketing = marketing %>% mutate(date = dmy(marketing$Dt_Customer))
+marketing = marketing %>% mutate(date = ymd(marketing$date))
+marketing = marketing %>% mutate(year = year(marketing$date))
+marketing = marketing %>% mutate(Age = marketing$year - marketing$Year_Birth)
+marketing = marketing %>% select(-date,-year,-Dt_Customer)
+ggplot(marketing) + geom_histogram(aes(x = Age), color = "white",fill = "pink",binwidth = 5) + geom_vline(aes(xintercept = mean(Age)), color = "purple") +
+  xlab("Возраст") +
+  ylab("Количество респондентов") +
+  ggtitle("Распределение респондентов по возрасту") +
+  theme_minimal()
+```
+
+По семейному статусу?
+```{r message = FALSE, warning=FALSE}
+marketing = marketing %>% filter(Marital_Status != "YOLO", Marital_Status != "Absurd" )
+levels(marketing$Marital_Status) = c(" ","Одинок(a)","Разведён(a)","Женат/Замужем","Одинок(a)","Вместе","Вдова(ец)"," ")
+ggplot(marketing) + geom_bar(aes(x = Response,fill = marketing$Marital_Status),position = "fill",color = "white", alpha = 0.7)+
+  scale_fill_discrete(name="Семейный статус")+
+  scale_x_discrete(breaks=c(0,1),label=c("Нет","Да")) + 
+  xlab("Ответ респондента на текущую компанию") +
+  ylab("Доля от общего числа человек(%)") +
+  ggtitle("Распределение респондентов по Семейному статусу")+
+  scale_y_continuous(labels = scales::percent_format())
+
+```
+
+Из графика видно, что распределение по семейному статусу неравномерно. Среди откликнувшихся на кампанию больше Одиноких, Разведённых и Вдовцов и меньше Женатых/Состоящих в отношениях (Вместе) людей.
+
+-------------------------------
+Теперь мы имеем представление о демографическом распределении респондентов. Сформулируем вопросы и изучим зависимости между переменными подробней. 
+
+*Вопрос №1:* Зависит ли Ответ на кaмпанию от Возраста респондента?
+
+```{r message = FALSE, warning=FALSE}
+marketing = marketing %>% filter (Age != 121, Age !=  114, Age !=  113)
+ggplot(marketing) + geom_boxplot(aes(x = marketing$Response,y = Age),fill="light yellow") +
+  scale_x_discrete(breaks=c(0,1),label=c("Нет","Да")) +
+  xlab("Ответ респондента на текущую компанию") +
+  ylab("Возраст") +
+  ggtitle("Распределение респондентов по возрасту")+
+  theme_bw()
+mean_age = marketing %>% group_by(Response) %>% summarise(mean(Age))
+```
+```{r message = FALSE, warning=FALSE}
+table_age = marketing %>% group_by(Response) %>% summarise(mean_age = mean(Age))
+dif_age = round(abs(table_age$mean_age[2] - table_age$mean_age[1]),2)
+
+```
+
+*Итог:* По графику можно сказать, что разница между средним возрастом обеих групп, составляющая меньше 1 года, визуально незначительна.
+
+Сформулируем гипотезы и убедимся с помощью теста
+
+`H0:` Средний возраст людей откликнувшихся на текущую компанию респондентов не отличается от среднего возраста не откликнувшихся
+
+`H1:` Существует разница в среднем возрасте людей откликнувшихся и не откликнувшихся на компанию
+
+Переменная Age имеет распределение близкое к нормальному, используем t-test
+```{r message = FALSE, warning=FALSE}
+t.test(Age ~ Response,data = marketing)
+```
+
+*Вывод:* На уровне значимости 0.05 статистически значимой разницы не обнаружено. Мы не можем отвергнуть H0.
+
+
+
+*Вопрос №2:* Действительно ли люди, состоящие в отношениях, реже отвечают на кампанию, чем те, у кого нет партнёра?
+
+При демографическом анализе было выявлено, что среди откликнувшихся на кампанию больше Одиноких, Разведённых и Вдовцов и меньше Женатых/Состоящих в отношениях (Вместе) людей. Таким образом, попробуем разделить их на две группы: В отношениях / Не в отношениях и посмотреть на разницу:
+
+```{r message = FALSE, warning=FALSE}
+marketing = marketing %>% mutate(Relationships = case_when(Marital_Status == "Женат/Замужем"~ "В отношениях", Marital_Status == "Вместе" ~ "В отношениях", T ~ "Не в отношниях"))
+marketing$Relationships = as.factor(marketing$Relationships)
+
+ggplot(marketing) + geom_bar(aes(x = Response,fill = marketing$Relationships),position = "fill",color = "white", alpha = 0.7)+
+  scale_fill_discrete(name="Статус отношений")+
+  scale_x_discrete(breaks=c(0,1),label=c("Нет","Да")) + 
+  xlab("Ответ респондента на текущую компанию") +
+  ylab("Доля от общего числа человек (%)") +
+  ggtitle("Распределение респондентов по Статусу отношений")+
+  scale_y_continuous(labels = scales::percent_format()) +
+  theme_bw()
+```
+
+Различие между группами стало намного заметней, посчитаем разницу
+```{r message = FALSE, warning=FALSE}
+table_rel = table(marketing$Response,marketing$Relationships)
+res_no_rel_no = (table_rel[2,2]/(sum(table_rel[2,1],table_rel[2,2])))*100
+res_yes_rel_no = (table_rel[1,2]/(sum(table_rel[1,1],table_rel[1,2])))*100
+dif_rel = abs(round(res_no_rel_no - res_yes_rel_no))
+
+```
+*Итог:* Выявленный размер эффекта составляет 20%
+
+`H0:` Разницы между Статусом отношений положительно и отрицательно ответивших на компанию респондентов не сущесвтует
+
+`H1:` Существует разница между Статусом отношений положительно и отрицательно ответивших на компанию респондентов 
+
+Для двух категориальных переменных используем тест Хи-квадрат:
+```{r message = FALSE, warning=FALSE}
+chisq.test(marketing$Relationships, marketing$Response)
+```
+
+*Вывод:* p-value достаточно мало. Разница между долями респондентов статистически значима (на уровне значимости 0.05). Мы можем отвергнуть H0 и использовать переменную Relationships подбирая разбиения при построении модели. 
+
+
+
+*Вопрос №3:* Правда ли, что люди положительно ответившие на предыдущую кaмпанию охотней откликаются на текущую? 
+
+```{r message = FALSE, warning=FALSE}
+ggplot(marketing) + geom_bar(aes(x = marketing$Response,fill = AcceptedCmp),position = "fill",color = "white", alpha = 0.7,) +
+  scale_fill_discrete(breaks=c(0,1),label=c("Нет","Да"),name = "Ответ на предыдущую\nкомпанию") +
+  scale_x_discrete(breaks=c(0,1),label=c("Нет","Да")) + 
+  xlab("Ответ респондента на текущую компанию") +
+  ylab("Доля от общего числа человек(%)") +
+  ggtitle("Распределение респондентов по ответу на предыдущую\nкомпанию")+
+  scale_y_continuous(labels = scales::percent_format()) +
+  theme_bw()
+```
+
+```{r message = FALSE, warning=FALSE}
+table_acc = table(marketing$Response ,marketing$AcceptedCmp == 1)
+dif_acc = ((table_acc[2,2]/sum(table_acc[2,1],table_acc[2,2])) - table_acc[1,2]/sum(table_acc[1,1],table_acc[1,2]))*100
+dif_acc = round(dif_acc)
+
+```
+
+*Итог:* Вычисленная явным образом разница составляет 24 %
+
+Проверим с помощью теста 
+
+`H0:` Разница между долями респондентов принявших предложение в предыдущую компанию, среди положительно и отрицательно ответивших на текущую компанию равна 0
+
+`H1:` Разница между долями респондентов принявших предложение в предыдущую компанию, среди положительно и отрицательно ответивших на текущую компанию не равна 0
+
+```{r message = FALSE, warning=FALSE}
+ch = chisq.test(marketing$Response, marketing$AcceptedCmp)
+ch
+```
+
+*Вывод:* p-value очень мало. На уровне значимости 0.05 существует статистически значимая разница между долями респондентов. Мы можем отвергнуть H0 и использовать переменную AcceptedCmp подбирая разбиения при построении модели. 
+
+
+
+*Вопрос №4:* Действительно ли чем меньше времени прошло с последней покупки, совершённой респондентом, тем охотней он принимает участие в текущей кaмпании? 
+
+```{r message = FALSE, warning=FALSE}
+ggplot(marketing) + geom_boxplot(aes(x = Response,y = Recency),fill="light yellow") +
+  scale_x_discrete(breaks=c(0,1),label=c("Нет","Да")) +
+  xlab("Ответ респондента на текущую компанию") +
+  ylab("Число дней") +
+  ggtitle("Распределение респондентов по количеству дней,\nпрошедших с последней покупки")+
+  theme_bw()
+```
+
+
+Визуально разница достаточно заметна. 
+Если точнее:
+```{r message = FALSE, warning=FALSE}
+table_rec = marketing %>% group_by(Response) %>% summarise(mean_rec = mean(Recency))
+dif_rec = round(abs(table_rec$mean_rec[2] - table_rec$mean_rec[1]))
+table_rec_med = marketing %>% group_by(Response) %>% summarise(median_rec = median(Recency))
+dif_rec_med = round(abs(table_rec_med$median_rec[2] - table_rec_med$median_rec[1]))
+```
+
+*Итог:* Разница в среднем количестве дней, прошедших с последней покупки составляет 17 дней. Разница медианных значений составила 23 дня.
+
+`H0:`Существует разница между количестовом дней, прошедших с последней покупки среди согласившихся и отказавшихся от участия в компании репондентов
+
+`H1:`Разницы между количестовом дней, прошедших с последней покупки среди согласившихся и отказавшихся от участия в компании репондентов не существует
+
+```{r message = FALSE, warning=FALSE}
+ggplot(marketing) + geom_histogram(aes(x = Recency), color = "white",fill = "pink",binwidth = 5)+   xlab("Число дней") +
+  ylab("Количество респондентов") +
+  theme_minimal()
+```
+
+Распределение не нормальное, используем тест перестановок
+```{r message = FALSE, warning=FALSE}
+independence_test(Recency ~ Response,data = marketing)
+```
+
+*Вывод:* Между количеством прошедших с последней покупки дней существует статистически значимая разница (на уровне значимости 0.05). Мы можем отвергуть H0 и учесть переменную Recency при построении модели.
+
+
+
+*Вопрос №5:* Участвуют ли чаще в текущей кaмпании клиенты с бОльшим доходом?
+
+Удалим выбросы сильно влияющие на результат
+```{r message = FALSE, warning=FALSE}
+marketing = marketing %>% filter(Income < 150000)
+```
+
+Посмотрим на распределение 
+```{r message = FALSE, warning=FALSE}
+ggplot(marketing) + geom_boxplot(aes(x = Response,y = Income),fill="light yellow") +
+  scale_x_discrete(breaks=c(0,1),label=c("Нет","Да")) +
+  xlab("Ответ респондента на текущую компанию") +
+  ylab("Доход ($)") +
+  ggtitle("Распределение респондентов по доходу")+
+  theme_bw()
+```
+
+```{r message = FALSE, warning=FALSE}
+table_inc = marketing %>% group_by(Response) %>% summarise(mean_inc = mean(Income))
+dif_inc = round(abs(table_inc$mean_inc[2] - table_inc$mean_inc[1]))
+table_inc_med = marketing %>% group_by(Response) %>% summarise(median_inc = median(Income))
+dif_inc_med = round(abs(table_inc_med$median_inc[2] - table_inc_med$median_inc[1]))
+```
+
+*Итог:* Выявлена разница среднего и медианного дохода, составляющая 10 847$
+и 14 998$ соответственно
+
+`H0:` Разница в размере дохода согласившихся и отказавшихся от участия в компании респондентов равна 0
+
+`H1:`Разница в размере дохода согласившихся и отказавшихся от участия в компании респондентов не равна 0
+
+```{r message = FALSE, warning=FALSE}
+ggplot(marketing) + geom_histogram(aes(x = Income),color = "white",fill = "pink",binwidth = 3000) + xlab("Доход") +
+  ylab("Число респондентов") +
+  ggtitle("Распределение респондентов по доходу")+
+  theme_minimal()
+```
+
+Распределение визуально неочевидно, используем тест перестановок
+```{r message = FALSE, warning=FALSE}
+independence_test(Income ~ Response, data = marketing)
+```
+
+*Вывод:* Разница в размере дохода между двумя группами существет и является статистически значимой (на уровне значимости 0.05). Мы можем отвернуть H0 и использовать переменную Income при построении модели. Однако, возможно более справедливой для оценки переменной была бы доля дохода, потраченного непосредственно на продукты питания. Проверим предположение
+
+
+
+*Вопрос №6:* Связана ли доля дохода которую репсондент тратит на продукты питания с его ответом на предложение в текущей кaмпании?
+
+```{r message = FALSE, warning=FALSE}
+marketing = marketing %>% mutate(food_expenses = (marketing$MntWines + marketing$MntFruits + marketing$MntMeatProducts + marketing$MntFishProducts + marketing$MntSweetProducts))
+food_percent = round((marketing$food_expenses/marketing$Income)*100,2)
+marketing = marketing %>% mutate(food_percent)
+marketing = marketing %>% select(-food_expenses)
+marketing = marketing %>% filter(!is.na(food_percent))
+
+ggplot(marketing) + geom_boxplot(aes(x = Response, y = food_percent),fill="light yellow") +
+  scale_x_discrete(breaks=c(0,1),label=c("Нет","Да")) +
+  xlab("Ответ респондента на текущую компанию") +
+  ylab("Доля дохода (%)") +
+  ggtitle("Распределение респондентов по доле дохода,\nпотраченного на продукты питания") +
+  theme_bw()
+```
+```{r message = FALSE, warning=FALSE}
+table_food = marketing %>% group_by(Response) %>% summarise(mean_food = mean(food_percent))
+dif_food = round(abs(table_food$mean_food[2] - table_food$mean_food[1]),2)
+table_food_med = marketing %>% group_by(Response) %>% summarise(median_food = median(food_percent))
+dif_food_med = round(abs(table_food_med$median_food[2] - table_food_med$median_food[1]),2)
+```
+
+*Итог:* Разница в средней и медианной доле дохода, уходящей на продукты составила 0.52% и 0.82% соответственно
+
+`H0:` Существует рзница в доле дохода, потраченного на продукты питания для респондентов ответивших и не ответивших на текщую компанию 
+
+`H1:` Разницы в доле дохода, потраченного на продукты питания для респондентов ответивших и не ответивших на текщую компанию не существует
+
+```{r message = FALSE, warning=FALSE}
+ggplot(marketing) + geom_histogram(aes(x = food_percent),color = "white",fill = "pink") +          xlab("Доля дохода (%)") +
+  ylab("Количество респондентов") +
+  theme_minimal()
+```
+
+Используем тест перестановок 
+```{r message = FALSE, warning=FALSE}
+independence_test(food_percent ~ Response, data = marketing )
+```
+
+*Вывод:* Выявленна статистически знаимая разница (на уровне значимости 0.05) в доле дохода, потраченного на продукты питания между двумя группами. Следовательно, мы можем отвергнуть H0 и использовать эту переменную, как критерий разбиения. 
+
+
+Посмотрим на данные иначе
+```{r message = FALSE, warning=FALSE}
+compareGroups::compareGroups(Response ~ .,data = marketing) %>% 
+  compareGroups::createTable()
+```
+Перекосы в данных в основном соотствуют выявленным переменным, что позволяет подтвердить заключения сделанные выше
+
+
+
+### Предсказание отклика на кампанию
+
+Посчитаем насколько однородны по Ответам на компанию наши исходные данные
+
+```{r message = FALSE, warning=FALSE}
+gini_initial = marketing %>% count(Response) %>% mutate(prop = n/sum(n)) %>% 
+  summarise(round((1 - sum(prop^2)),2))
+```
+
+*Исходный Gini index:* 0.37
+
+Для того, чтобы понять, насколько наши предсказания генерализируемы и распространимы на популяцию, разделим наблюдения на тренировочную и тестовую выборки. Построим разбиение по выявленным переменным на тренировочной выборке и проверим качество предсказания на тестовой
+```{r message = FALSE, warning=FALSE}
+set.seed(8)
+market_train = marketing %>% sample_frac(0.8)
+market_test = anti_join(marketing, market_train, by = 'ID') %>% select(-ID)
+market_train = market_train %>% select(-ID)
+
+my_train_tree = rpart(Response ~ Relationships + AcceptedCmp + Recency + Income + food_percent, method = "class", data = market_train)
+
+rpart.plot(my_train_tree, extra = 106)
+```
+
+Обрежем дерево по cp
+
+```{r message = FALSE, warning=FALSE}
+plotcp(my_train_tree)
+#my_train_tree$cptable
+```
+```{r message = FALSE, warning=FALSE}
+my_train_tree = prune(my_train_tree,cp = 0.02098765)
+rpart.plot(my_train_tree, extra = 106)
+```
+
+
+Проверим качество нашей модели на тренировочной выборке 
+
+
+```{r message = FALSE, warning=FALSE}
+market_train = market_train %>% mutate(my_prediction = predict(my_train_tree,type="class",data = market_train))
+t_train = table(truth = market_train$Response, estimate = market_train$my_prediction)
+my_accuracy_train = round((t_train[1,1] + t_train[2,2])/sum(t_train),3)
+my_gini_train = round(gini_split(data = market_train, real = Response, predicted = my_prediction),3)
+```
+*Точность на тренировочной модели составила:* 0.81
+*Gini impurity:* = 0.31
+
+
+
+Посчитаем качество  насколько применима построенная модель для тестовой выборки
+
+
+```{r message = FALSE, warning=FALSE}
+set.seed(8)
+market_test = market_test %>% mutate(my_prediction_test = predict(my_train_tree, market_test, type = "class"))
+
+t_test = table(truth = market_test$Response, estimate = market_test$my_prediction_test)
+my_accuracy_test = round((t_test[1,1] + t_test[2,2])/sum(t_test),3)
+my_gini_test = round(gini_split(data = market_test, real = Response, predicted = my_prediction_test),3)
+```
+*Точность на тестовой модели составила:* 0.79
+*Gini impurity:* = 0.32
+
+*Вывод:* Дерево решений произвело разбиение по заданным переменным, несколько из которых были созданы вручную. Таким образом модель предсказала положительный отклик на кaмпанию двум группам: тем, кто откликнулся на предыдущую кaмпанию и тем, кто: не откликнулся на предыдущую кaмпанию, но совершил последнюю покупку менее 45 дней назад, тратит на продукты питания более 1.5 % от дохода и при этом не состоит в отношениях. Тем, кто не удовлетворил данным критериям модель предсказала отрицательный отклик на текущую кaмпанию. Итоговая модель демонстрирует достаточно высокую точность, как на тренировочной, так и на тестовой выборке, так же снижая исходный Gini Impurity. 
+
+
+Можно ли сделать нашу модель более точной и ещё больше снизить Gini Impurity?
+Определим наилучшее автоматическое разбиение по всем переменным для тенировочной выборки
+
+```{r message = FALSE, warning=FALSE}
+set.seed(8)
+market_train = market_train %>% select(-my_prediction)
+
+auto_tree = rpart(Response ~ ., method = "class", data = market_train)
+rpart.plot(auto_tree, extra = 106)
+```
+
+
+```{r message = FALSE, warning=FALSE}
+#auto_tree$cptable
+plotcp(auto_tree)
+```
+
+
+```{r message = FALSE, warning=FALSE}
+auto_tree = prune(auto_tree, cp=0.01185185 )
+rpart.plot(auto_tree)
+```
+
+
+```{r message = FALSE, warning=FALSE}
+market_train = market_train %>% mutate(auto_prediction_train = predict(auto_tree,type="class",data = market_train))
+t_a = table(truth = market_train$Response, estimate = market_train$auto_prediction_train)
+auto_accuracy_train = (t_a[1,1] + t_a[2,2])/sum(t_a)
+auto_gini_train = gini_split(data = market_train, real = Response, predicted = auto_prediction_train)
+```
+*Точность на тренировочной модели составила:* 0.87
+*Gini impurity:* = 0.22
+
+
+Проверим её качество на тестовой:
+```{r message = FALSE, warning=FALSE}
+set.seed(8)
+market_test = market_test %>% select(-my_prediction_test)
+market_test = market_test %>% mutate(auto_prediction_test = predict(auto_tree, market_test, type = "class"))
+a_test = table(truth = market_test$Response, estimate = market_test$auto_prediction_test)
+auto_accuracy_test = round((a_test[1,1] + a_test[2,2])/sum(a_test),3)
+auto_gini_test = round(gini_split(data = market_test, real = Response, predicted = auto_prediction_test),3)
+```
+*Точность на тестовой модели составила:* 0.79
+*Gini impurity:* = 0.3
+
+
+*Вывод:* Дерево построенное по всем переменным вышло достаточно глубоким, использовалo многие из выявленных переменных, а так же несколько других. Точность на тренировочной выборке выше, а gini impurity ниже, чем у предыдущей модели. Однако, на тестовой выборке разница между двумя моделями в точности и чистоте практически незаметна. В то время как глубина дерева, построенного по заданным переменным заметно меньше, что говорит в пользу первой модели. Её мы и мудем использовать для итогового предсказания.  
+
+
+## Общие выводы
+
+В результате проведённого анализа были выявлены группы респондентов, которые с наибольшей вероятностью откликнуться на новую маркетинговую компанию. 
+Моя рекомендация при дальнейшем проведении кампании в других магазинах сети: уделить особое внимание целевой аудитории, состоящей в первую очередь из респондентов, откликнувшихся на предыдущую маркетинговую кампанию, а так же из одиноких клиентов, выделяющих больше 1.5 % своего дохода на продукты питания и совершивших в нашем магазине покупки не позже, чем за 45 дней до проведения кампании. 
+
